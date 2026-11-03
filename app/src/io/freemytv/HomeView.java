@@ -81,7 +81,8 @@ import java.util.function.Consumer;
  * Measurements are in a 1920×1080 space (k = width / 1920). The screen is split into layers so the TV's weak GPU only
  * redraws what changed.
  */
-final class HomeView extends ViewGroup implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener {
+final class HomeView extends ViewGroup implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener,
+        HappController.Listener {
     // tvOS grid (Human Interface Guidelines): content inside the safe area, 80 px from the sides and 60 from top and
     // bottom; 40 px between items; 7 columns of 217 px (the apps). The shelf glass extends 36 px past the tiles (the
     // same padding on all four sides) and the tile corners are concentric with it (glass radius = radius + padding).
@@ -113,6 +114,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final int SKY = 0, HERO = 1, STATUS = 2, PLATTER = 3, TILES = 4, DRAWER = 5, SHEET = 6, TOAST = 7, MENU = 8, RECENT = 9;
     private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3;
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
+    private static final ExecutorService IP_LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
     private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
@@ -144,6 +146,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean networkRegistered, devicesRegistered, mediaRegistered;
     private int network;   // 0 = not connected, 1 = Wi-Fi, 2 = Ethernet
     private boolean bluetoothConnected, usbConnected;
+    private String localIp = "", externalIp = "", ipCountry = "";
+    private long ipRefreshAt;
+    private int ipRevision;
     /** The status layer spans the screen while the icons are on (they sit at the left); off, it keeps its old width. */
     private boolean statusWide;
     private final Spoken spoken = new Spoken(this, new Spoken.Source() {
@@ -438,15 +443,48 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private final ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
+        @Override public void onAvailable(Network network) {
+            refreshIp(true);
+        }
+
         @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
             setNetwork(caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? 2
                     : caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? 1 : 0);
+            refreshIp(false);
         }
 
         @Override public void onLost(Network network) {
             setNetwork(0);
+            refreshIp(true);
         }
     };
+
+    /** Network requests stay off the UI thread; results from an earlier resume are discarded. */
+    private void refreshIp(boolean force) {
+        if (!running) return;
+        long now = SystemClock.uptimeMillis();
+        if (!force && now - ipRefreshAt < 300_000) return;
+        ipRefreshAt = now;
+        int revision = ++ipRevision;
+        Context context = getContext().getApplicationContext();
+        IP_LOADER.execute(() -> {
+            String local = IpAddresses.local(context);
+            String external = IpAddresses.external();
+            String country = IpAddresses.country(context, external);
+            handler.post(() -> {
+                if (!running || revision != ipRevision) return;
+                localIp = local;
+                externalIp = external;
+                ipCountry = country;
+                status.invalidate();
+            });
+        });
+    }
+
+    @Override public void onHappStateChanged(int state) {
+        status.invalidate();
+        if (state == HappController.STATE_CONNECTED || state == HappController.STATE_DISCONNECTED) refreshIp(true);
+    }
 
     /** Wi-Fi or Ethernet, for the icon at the top; none when the TV has no network. */
     private void setNetwork(int type) {
@@ -512,8 +550,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Reads the icons' state and listens for changes only while the setting is on (nothing runs with it off). */
     private void startStatus() {
-        if (!Prefs.statusIcons()) return;
-        updateDevices();
+        if (Prefs.statusIcons()) updateDevices();
         // The registration hands the current network over at once, so the first read is this callback. With no
         // network at all it hands nothing, and the icon would keep the one from before the pause (Wi-Fi turned off).
         if (connectivity != null && !networkRegistered) {
@@ -524,7 +561,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             } catch (RuntimeException ignored) {
             }
         }
-        if (!devicesRegistered) {
+        if (Prefs.statusIcons() && !devicesRegistered) {
             IntentFilter f = new IntentFilter();
             f.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
             f.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
@@ -545,7 +582,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         // A mounted drive's broadcast carries a file:// URI: in the same filter as the Bluetooth actions it would make
         // those never match (they have no data), so it gets a filter of its own.
-        if (!mediaRegistered) {
+        if (Prefs.statusIcons() && !mediaRegistered) {
             IntentFilter f = new IntentFilter();
             f.addAction(Intent.ACTION_MEDIA_MOUNTED);
             f.addAction(Intent.ACTION_MEDIA_UNMOUNTED);
@@ -600,6 +637,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             checkNight(true);
             updatePicks();      // new ones every hour
             updateSleep();
+            refreshIp(false);
             handler.postDelayed(this, 15_000);
         }
     };
@@ -704,6 +742,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         ImmichPhotos.syncIfDue(getContext(), ownReady);   // or a new choice from the Immich server, every 6 hours
         if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
         startStatus();
+        HappController.setListener(this);
+        HappController.start(getContext());
+        refreshIp(true);
         handler.postDelayed(tick, 15_000);
         playing.start();
         checkNotices();
@@ -746,6 +787,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         recs.removeListener(this);
         if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
         stopStatus();
+        HappController.stop(getContext());
+        HappController.setListener(null);
+        ipRevision++;
     }
 
     void destroy() {
@@ -3289,6 +3333,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = tileRects[shelfIndex];
         }
         click.open();
+        if (it.kind == HomeApps.HAPP) {
+            HappController.toggle(activity);
+            return;
+        }
         if (it.kind == HomeApps.RECENTS) {
             openRecents();
             return;
@@ -4789,13 +4837,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
             scene.liquid(c, cell, rad, tone(glassLight(), SMOKE), tone(0.55f, 0.5f), tone(0.02f, 0.01f), 12 * k, 8 * k,
                     tone(0.6f, 0.45f), 1 - f);
+            boolean vpnOn = it.kind == HomeApps.HAPP && HappController.state() == HappController.STATE_CONNECTED;
+            if (vpnOn) {
+                fill.setShader(null);
+                fill.setColor(Ui.alpha(UP_COLOR, 0.86f * (1 - f)));
+                c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
+            }
             if (f > 0.01f) {
                 fill.setShader(null);
                 fill.setColor(Ui.alpha(0xFFFFFFFF, f));
                 c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
             }
             Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.centerY(), 27 * k * s,
-                    blend(tone(L_INK, 0xEBFFFFFF), L_INK, f));
+                    blend(vpnOn ? WHITE : tone(L_INK, 0xEBFFFFFF), L_INK, f));
             if (f > 0.01f) {
                 String label = it.label;
                 float half = lTip.measureText(label) / 2;
@@ -4805,6 +4859,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             if (transform) c.restore();
         }
+        String ipText = "LAN " + (localIp.isEmpty() ? "—" : localIp)
+                + "     WAN " + (externalIp.isEmpty() ? "—" : externalIp)
+                + (ipCountry.isEmpty() ? "" : "  " + IpAddresses.flag(ipCountry));
+        fitPaint.set(lQuote);
+        String shown = TextUtils.ellipsize(ipText, fitPaint, 900 * k, TextUtils.TruncateAt.START).toString();
+        c.drawText(shown, CONTENT_R * k - fitPaint.measureText(shown), 226 * k, fitPaint);
         if (sleepText.isEmpty()) return;
         float right = (lightButtons.isEmpty() ? CONTENT_R * k : topRects[3].left) - 28 * k, cy = L_BUTTON_CY * k;
         float tw = lQuote.measureText(sleepText), size = lQuote.getTextSize();

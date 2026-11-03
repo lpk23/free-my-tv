@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.freemytv"
-    android:versionCode="4"
+    android:versionCode="5"
     android:versionName="1.3">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -84,6 +84,8 @@
         <package android:name="com.amazon.tv.livetv" />
         <package android:name="com.amazon.tv.inputpreference.service" />
         <package android:name="com.amazon.mediatek.livetv" />
+        <!-- Happ Proxy Utility: optional VPN button on the home screen. -->
+        <package android:name="su.happ.proxyutility" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />

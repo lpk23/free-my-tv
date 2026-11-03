@@ -1,0 +1,7 @@
+IP country data: DB-IP Country Lite, November 2026, by DB-IP.com.
+https://db-ip.com/db/lite.php
+Licensed under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/
+
+The application includes a compact IPv4-only conversion of the original CSV.
+The data is approximate and may be updated in future builds.
